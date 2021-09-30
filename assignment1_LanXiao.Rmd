@@ -1,0 +1,658 @@
+---
+title: "A Plolicy Brief about Transit Oriented Development of Los Angeles"
+author: "Lan Xiao"
+date: "September 2021"
+output:
+  html_document:
+    toc: yes
+    toc_float: TRUE
+    code_folding: hide
+  word_document:
+    toc: yes
+  pdf_document:
+    toc: yes
+  md_document:
+    toc: yes
+---
+# Motivation {#anchor}
+As the largest county by resident population in the US, Los Angeles has one of the most well-spread and extended subway systems. But how much value this transit network brings is still a question, considering local vast car ownership and driving travel habits. Should we continue to develop the metro system? Who are the current primary beneficiaries, and who should be targeted in the future? This brief report will analyze several indicators across time and space to help the government make future strategic decisions for the subway network.
+
+# Data Wrangling {#anchor}
+**Environment Setup**
+```{r setup, results = FALSE, message = FALSE}
+library(tidyverse)
+library(tidycensus)
+library(sf)
+library(kableExtra)
+library(crimedata)
+library(RColorBrewer)
+library(cowplot)
+
+options(scipen=999)
+options(tigris_class = "sf")
+
+root.dir = "https://raw.githubusercontent.com/urbanSpatial/Public-Policy-Analytics-Landing/master/DATA/"
+source("https://raw.githubusercontent.com/urbanSpatial/Public-Policy-Analytics-Landing/master/functions.r")
+```
+**Plot and Map Setup**
+```{r Plot and Map Setup, include=FALSE}
+mapTheme <- function(base_size = 12) {
+  theme(
+    text = element_text( color = "black"),
+    plot.title = element_text(size = 16,colour = "black"),
+    plot.subtitle=element_text(face="italic"),
+    plot.caption=element_text(hjust=0),
+    axis.ticks = element_blank(),
+    panel.background = element_blank(),axis.title = element_blank(),
+    axis.text = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(colour = "black", fill=NA, size=2),
+    strip.text.x = element_text(size = 14))
+}
+
+plotTheme <- function(base_size = 12) {
+  theme(
+    text = element_text( color = "black"),
+    plot.title = element_text(size = 16,colour = "black"),
+    plot.subtitle = element_text(face="italic"),
+    plot.caption = element_text(hjust=0),
+    axis.ticks = element_blank(),
+    panel.background = element_blank(),
+    panel.grid.major = element_line("grey80", size = 0.1),
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(colour = "black", fill=NA, size=2),
+    strip.background = element_rect(fill = "grey80", color = "white"),
+    strip.text = element_text(size=12),
+    axis.title = element_text(size=12),
+    axis.text = element_text(size=10),
+    plot.background = element_blank(),
+    legend.background = element_blank(),
+    legend.title = element_text(colour = "black", face = "italic"),
+    legend.text = element_text(colour = "black", face = "italic"),
+    strip.text.x = element_text(size = 14)
+  )
+}
+
+palette5 <- c('#f2d6a2', '#dfd688', '#ccd270', '#b8ca58', '#a4bf41')
+palette6 <- c('#ffd358', '#e1cf5b', '#b9bc4e', '#879a32', '#4f6d00')
+palette7 <- c('#f2d6a2', '#e9d596', '#dfd38a', '#d6d17e', '#ccce72', '#c2cb66', '#b8c85a', '#aec44d', '#a4bf41')
+```
+**Function Setup-MultipleRingBuffer**
+```{r Function Setup-MultipleRingBuffer, message=FALSE, include=FALSE}
+multipleRingBuffer <- function(inputPolygon, maxDistance, interval) 
+{
+  #create a list of distances that we'll iterate through to create each ring
+  distances <- seq(0, maxDistance, interval)
+  #we'll start with the second value in that list - the first is '0'
+  distancesCounter <- 2
+  #total number of rings we're going to create
+  numberOfRings <- floor(maxDistance / interval)
+  #a counter of number of rings
+  numberOfRingsCounter <- 1
+  #initialize an otuput data frame (that is not an sf)
+  allRings <- data.frame()
+  
+  #while number of rings  counteris less than the specified nubmer of rings
+  while (numberOfRingsCounter <= numberOfRings) 
+  {
+    #if we're interested in a negative buffer and this is the first buffer
+    #(ie. not distance = '0' in the distances list)
+    if(distances[distancesCounter] < 0 & distancesCounter == 2)
+    {
+      #buffer the input by the first distance
+      buffer1 <- st_buffer(inputPolygon, distances[distancesCounter])
+      #different that buffer from the input polygon to get the first ring
+      buffer1_ <- st_difference(inputPolygon, buffer1)
+      #cast this sf as a polygon geometry type
+      thisRing <- st_cast(buffer1_, "POLYGON")
+      #take the last column which is 'geometry'
+      thisRing <- as.data.frame(thisRing[,ncol(thisRing)])
+      #add a new field, 'distance' so we know how far the distance is for a give ring
+      thisRing$distance <- distances[distancesCounter]
+    }
+    
+    
+    #otherwise, if this is the second or more ring (and a negative buffer)
+    else if(distances[distancesCounter] < 0 & distancesCounter > 2) 
+    {
+      #buffer by a specific distance
+      buffer1 <- st_buffer(inputPolygon, distances[distancesCounter])
+      #create the next smallest buffer
+      buffer2 <- st_buffer(inputPolygon, distances[distancesCounter-1])
+      #This can then be used to difference out a buffer running from 660 to 1320
+      #This works because differencing 1320ft by 660ft = a buffer between 660 & 1320.
+      #bc the area after 660ft in buffer2 = NA.
+      thisRing <- st_difference(buffer2,buffer1)
+      #cast as apolygon
+      thisRing <- st_cast(thisRing, "POLYGON")
+      #get the last field
+      thisRing <- as.data.frame(thisRing$geometry)
+      #create the distance field
+      thisRing$distance <- distances[distancesCounter]
+    }
+    
+    #Otherwise, if its a positive buffer
+    else 
+    {
+      #Create a positive buffer
+      buffer1 <- st_buffer(inputPolygon, distances[distancesCounter])
+      #create a positive buffer that is one distance smaller. So if its the first buffer
+      #distance, buffer1_ will = 0. 
+      buffer1_ <- st_buffer(inputPolygon, distances[distancesCounter-1])
+      #difference the two buffers
+      thisRing <- st_difference(buffer1,buffer1_)
+      #cast as a polygon
+      thisRing <- st_cast(thisRing, "POLYGON")
+      #geometry column as a data frame
+      thisRing <- as.data.frame(thisRing[,ncol(thisRing)])
+      #add teh distance
+      thisRing$distance <- distances[distancesCounter]
+    }  
+    
+    #rbind this ring to the rest of the rings
+    allRings <- rbind(allRings, thisRing)
+    #iterate the distance counter
+    distancesCounter <- distancesCounter + 1
+    #iterate the number of rings counter
+    numberOfRingsCounter <- numberOfRingsCounter + 1
+  }
+  
+  #convert the allRings data frame to an sf data frame
+  allRings <- st_as_sf(allRings)
+}
+```
+
+## Downloading & Wrangling Census Data
+**Downloading census data of 2010**
+```{r Downloading census data of 2010, results = FALSE, message = FALSE}
+tracts10 <- 
+  get_acs(geography = "tract", variables = c("B01001_001E","B01001I_001E","B08301_001E",
+                                             "B08301_010E","B19013_001E","B25058_001E",
+                                             "B06012_002E"), 
+          year=2010, state=06, county=037, geometry=T, output="wide") %>%
+  st_transform('ESRI:102645') %>%
+  rename(TotalPop = B01001_001E, LATINO = B01001I_001E,
+         TotalTrans_toWork = B08301_001E,	PublicTrans_toWork = B08301_010E,
+         MedHHInc = B19013_001E, MedRent = B25058_001E,
+         TotalPoverty = B06012_002E) %>%
+  dplyr::select(-NAME, -starts_with("B")) %>%
+  mutate(pctLATINO = ifelse(TotalPop > 0, LATINO / TotalPop,0),
+         pctPublicTrans_toWork = ifelse(TotalTrans_toWork > 0, PublicTrans_toWork / TotalTrans_toWork, 0),
+         pctPoverty = ifelse(TotalPop > 0, TotalPoverty / TotalPop, 0),
+         year = "2010") %>%
+  dplyr::select(-LATINO,-PublicTrans_toWork, -TotalTrans_toWork, -TotalPoverty) 
+
+#Dropping geometry & check trachts10, because we only need one geometry when binding
+st_drop_geometry(tracts10)[1:3,]
+```
+**Downloading census data of 2019**
+```{r Downloading census data of 2019, results = FALSE, message = FALSE}
+tracts19 <- 
+  get_acs(geography = "tract", variables = c("B01001_001E","B01001I_001E","B08301_001E",
+                                             "B08301_010E","B19013_001E","B25058_001E",
+                                             "B06012_002E"), 
+          year=2019, state=06, county=037, geometry=T, output="wide") %>%
+  st_transform('ESRI:102645') %>%
+  rename(TotalPop = B01001_001E, LATINO = B01001I_001E,
+         TotalTrans_toWork = B08301_001E,	PublicTrans_toWork = B08301_010E,
+         MedHHInc = B19013_001E, MedRent = B25058_001E,
+         TotalPoverty = B06012_002E) %>%
+  dplyr::select(-NAME, -starts_with("B")) %>%
+  mutate(pctLATINO = ifelse(TotalPop > 0, LATINO / TotalPop,0),
+         pctPublicTrans_toWork = ifelse(TotalTrans_toWork > 0, PublicTrans_toWork / TotalTrans_toWork, 0),
+         pctPoverty = ifelse(TotalPop > 0, TotalPoverty / TotalPop, 0),
+         year = "2019") %>%
+  dplyr::select(-LATINO,-PublicTrans_toWork, -TotalTrans_toWork, -TotalPoverty) 
+```
+**Binding all census data**
+```{r Binding all census data}
+allTracts <- rbind(tracts10,tracts19)
+```
+
+## Wrangling Transit data & Defining TOD area
+**Downloading & transfering transit data**
+```{r Download & transfer transit data,results = FALSE, message = FALSE}
+MetroStops <- 
+  st_read("/Users/lexi/Desktop/UPENN_COURSE/MUSA_508/assignment/assignment1/data_source/Stations_All_0316/Stations_All_0316.shp") %>% 
+  st_transform(st_crs(tracts19))
+```
+**Making buffers to define area within half mileof stations**
+```{r making buffers}
+MetroBuffers <- 
+  rbind(
+    st_buffer(MetroStops, 2640) %>%
+      mutate(Legend = "Buffer") %>%
+      dplyr::select(Legend),
+    st_union(st_buffer(MetroStops, 2640)) %>%
+      st_sf() %>%
+      mutate(Legend = "Unioned Buffer"))
+```
+**Selecting unioned buffer**
+```{r Selecting unioned buffer}
+buffer <- filter(MetroBuffers, Legend=="Unioned Buffer")
+```
+## Relating Census Tracts and TOD Definition in Space
+**Classifying allTracts into TOD and NonTOD**
+```{r Classifying allTracts into TOD and NonTOD, message=FALSE, warning=FALSE}
+allTracts.group <- 
+  rbind(
+    st_centroid(allTracts)[buffer,] %>%
+      st_drop_geometry() %>%
+      left_join(allTracts) %>%
+      st_sf() %>%
+      mutate(TOD = "TOD"),
+    st_centroid(allTracts)[buffer, op = st_disjoint] %>%
+      st_drop_geometry() %>%
+      left_join(allTracts) %>%
+      st_sf() %>%
+      mutate(TOD = "Non-TOD")) %>%
+  mutate(MedRent.inf = ifelse(year == "2010", MedRent * 1.17, MedRent)) %>% 
+  drop_na(MedRent.inf) %>%
+      st_sf() 
+```
+## Downloading & Wrangling Crime Data
+```{r Downloading & Wrangling Crime Data, message=FALSE, results=FALSE}
+allrobberies <- get_crime_data(
+  years = c(2010,2019), 
+  cities = "Los Angeles", 
+  type = "core"
+) %>% 
+  filter(offense_type == "personal robbery") %>% 
+  mutate(year = ifelse(lubridate::year(date_single)==2010,2010,lubridate::year(date_single)))
+
+allrobberies.sf <- allrobberies %>% 
+  st_as_sf(coords = c("longitude","latitude"), crs= 4269) %>% 
+  st_transform(st_crs(allTracts.group))
+
+
+```
+# Analysis {#anchor}
+## TOD Indicator Maps & Tables & Plots - comparing four variables across time and space
+**Median rent across time and space**
+```{r Median rent across time and space, fig.height=9, fig.width=9}
+ggplot(allTracts.group)+
+  geom_sf(data = st_union(tracts10))+
+  geom_sf(aes(fill = q5(MedRent.inf)), color = "transparent") +
+  geom_sf(data = buffer, fill = "transparent", color = "#D9653B", size = 0.5)+
+  scale_fill_manual(values = palette5,
+                    labels = qBr(allTracts.group, "MedRent.inf"),
+                    name = "Rent($)\n(Quintile Breaks)",
+                    na.value = "#F5F5F5") +
+  labs(title = "Median Rent 2010 - 2019", 
+       subtitle = "Real Dollars; The orange border donotes areas close to subway tations",
+       caption = "Data: US Census Bureau, ACS 5-year estimates") +
+  facet_wrap(~year)+
+  mapTheme() + 
+  theme(plot.title = element_text(size=16)) + 
+  theme(plot.margin=unit(c(0,0,0,0), "cm"), legend.text.align = 1)
+```
+**Percentage of people who take public transport to work across time and space**
+```{r Percentage of People Who Take Public Transport to Work, fig.height=9, fig.width=9}
+allTracts.group.pct <- allTracts.group %>% 
+  select(pctLATINO, pctPublicTrans_toWork, pctPoverty) %>% 
+   mutate(pctLATINO = round(pctLATINO*100,1),
+         pctPublicTrans_toWork = round(pctPublicTrans_toWork*100,1),
+         pctPoverty = round(pctPoverty*100,1))
+ggplot(allTracts.group)+
+  geom_sf(data = st_union(tracts10))+
+  geom_sf(aes(fill = q5(pctPublicTrans_toWork)), color = "transparent") +
+  geom_sf(data = buffer, fill = "transparent", color = "#D9653B", size = 0.5)+
+  scale_fill_manual(values = c("#F5F5F5",palette5[1],palette5[3:5]),
+                    labels = qBr(allTracts.group.pct, "pctPublicTrans_toWork",0),
+                    name = "Percentage (%)\n(Quintile Breaks)",
+                    na.value = "#F5F5F5") +
+  labs(title = "People Who Take Public Transport to Work 2010 - 2019", 
+       subtitle = "Percentage; The orange border donotes areas close to subway tations",
+       caption = "Data: US Census Bureau, ACS 5-year estimates") +
+  facet_wrap(~year)+
+  mapTheme() + 
+  theme(plot.title = element_text(size=16)) + 
+  theme(plot.margin=unit(c(0,0,0,0), "cm"), legend.text.align = 1)
+```
+**Percentage of Latino population across time and space**
+```{r Percentage of Latino Population across time and space, fig.height=9, fig.width=9}
+ggplot(allTracts.group)+
+  geom_sf(data = st_union(tracts10))+
+  geom_sf(aes(fill = q5(pctLATINO)), color = "transparent") +
+  geom_sf(data = buffer, fill = "transparent", color = "#D9653B", size = 0.5)+
+  scale_fill_manual(values = c("#F5F5F5",palette5[1],palette5[3:5]),
+                    labels = qBr(allTracts.group.pct, "pctLATINO",0),
+                    name = "Latino (%)\n(Quintile Breaks)",
+                    na.value = "#F5F5F5") +
+  labs(title = "Latino Poppulation 2010 - 2019", 
+       subtitle = "Percentage; The orange border donotes areas close to subway tations",
+       caption = "Data: US Census Bureau, ACS 5-year estimates") +
+  facet_wrap(~year)+
+  mapTheme() + 
+  theme(plot.title = element_text(size=16)) + 
+  theme(plot.margin=unit(c(0,0,0,0), "cm"), legend.text.align = 1)
+```
+**Percentage of poverty population across time and space**
+```{r, fig.height=9, fig.width=9}
+allTracts.group.pct <- allTracts.group %>% 
+  select(pctLATINO, pctPublicTrans_toWork, pctPoverty) %>% 
+  mutate(pctLATINO = round(pctLATINO*100,1),
+         pctPublicTrans_toWork = round(pctPublicTrans_toWork*100,1),
+         pctPoverty = round(pctPoverty*100,1))
+ggplot(allTracts.group)+
+  geom_sf(data = st_union(tracts10))+
+  geom_sf(aes(fill = q5(pctPoverty)), color = "transparent") +
+  geom_sf(data = buffer, fill = "transparent", color = "#D9653B", size = 0.5)+
+  scale_fill_manual(values = c("#F5F5F5",palette5[1],palette5[3:5]),
+                    labels = qBr(allTracts.group.pct, "pctPoverty",0),
+                    name = "Poverty (%)\n(Quintile Breaks)",
+                    na.value = "#F5F5F5") +
+  labs(title = "Poverty Poppulation 2010 - 2019", 
+       subtitle = "Percentage; The orange border donotes areas close to subway tations",
+       caption = "Data: US Census Bureau, ACS 5-year estimates") +
+  facet_wrap(~year)+
+  mapTheme() + 
+  theme(plot.title = element_text(size=16)) + 
+  theme(plot.margin=unit(c(0,0,0,0), "cm"), legend.text.align = 1)
+```
+**Population density across time and space**
+```{r Population density across time and space, fig.height=9, fig.width=9}
+ggplot(allTracts.group)+
+  geom_sf(data = st_union(tracts10))+
+  geom_sf(aes(fill = q5(TotalPop)), color = "transparent") +
+  geom_sf(data = buffer, fill = "transparent", color = "#D9653B", size = 0.5)+
+  scale_fill_manual(values = palette5,
+                    labels = qBr(allTracts.group, "TotalPop",0),
+                    name = "Population\n(Quintile Breaks)",
+                    na.value = "#F5F5F5") +
+  labs(title = "Population Density 2010 - 2019", 
+       subtitle = "The orange border donotes areas close to subway tations",
+       caption = "Data: US Census Bureau, ACS 5-year estimates") +
+  facet_wrap(~year)+
+  mapTheme() + 
+  theme(plot.title = element_text(size=16)) + 
+  theme(plot.margin=unit(c(0,0,0,0), "cm"), legend.text.align = 1)
+```
+**Statistic table by year and TOD type**
+```{r Statistic table by year and TOD type, message=FALSE, warning=FALSE}
+allTracts.Summary <- 
+  st_drop_geometry(allTracts.group) %>%
+    group_by(year, TOD) %>%
+    summarize(Rent = mean(MedRent, na.rm = T),
+              Population = mean(TotalPop, na.rm = T),
+              Percent_Latino = mean(pctLATINO, na.rm = T),
+              Pct_PubTrans_Work = mean(pctPublicTrans_toWork, na.rm = T),
+              Percent_Poverty = mean(pctPoverty, na.rm = T))
+
+kable(allTracts.Summary) %>%
+  kable_styling() %>%
+  footnote(general_title = "\n",
+           general = "Table 1")
+```
+**Statistic by variables**
+```{r Statistic by variables, message=FALSE, warning=FALSE}
+allTracts.Summary %>%
+  unite(year.TOD, year, TOD, sep = ": ", remove = T) %>%  #pasting together multiple columns into one.
+  gather(key = Variable, value = Value, -year.TOD) %>% #putting all variables into 1 column, except year.TOD 
+  mutate(Value = round(Value, 2)) %>% #round value
+  spread(key = year.TOD, value = Value) %>% #spreading year.TOD
+
+kable() %>%
+  kable_styling() %>%
+  footnote(general_title = "\n",
+          general = "Table 2")
+```
+**TOD indicator plots - comparing four selected Census variables across time and space**
+```{r TOD indicator plots, fig.height=4, fig.width=11}
+allTracts.Summary %>%
+  gather(Variable, Value, -year, -TOD) %>%
+  ggplot(aes(year, Value, fill = TOD)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    facet_wrap(~Variable, scales = "free", ncol = 5) +
+    scale_fill_manual(values = c(palette5[1],palette5[5])) +
+    labs(title = "Indicator Differences across Time and Space") +
+    theme(legend.position="bottom") +
+    theme(plot.title = element_text(size=26)) + 
+    plotTheme()
+```
+
+## Population & Rent Maps - within 0.5 mile of transit stations
+**Population maps within 0.5 mile of each transit station**
+```{r population graduated symbol map, fig.height=16, fig.width=9, warning=FALSE}
+p3=ggplot()+
+  geom_sf(data=(tracts10),
+          fill = "#F5F5F5", color = "grey",size = 0.1)+
+  ylim(1736000,1890000)+
+  xlim(6410000,6600000)+
+  geom_sf(data = allTracts.group %>%
+            dplyr::filter(TOD=="TOD") %>% 
+            dplyr::filter(year==2010) %>% 
+            st_centroid(),  
+          shape = 21,
+          aes(size = q5(TotalPop), fill = q5(TotalPop))) + 
+  scale_size_manual(
+    values = c(0.5,1,2,3,4), 	
+    name="Population",
+    labels = qBr(allTracts.group,"TotalPop",0)
+  ) +
+  scale_fill_manual(values = rev(palette6),
+                    labels = qBr(allTracts.group, "TotalPop",0),
+                    guide = FALSE ) +
+  labs(title = "Population Density 2010 within 0.5 mile of Merto Stations", 
+       subtitle = "Count by Census Tracts",
+       caption = "Data: US Census Bureau, ACS 5-year estimates",
+       size = 22) +
+  mapTheme() + 
+  theme(plot.title = element_text(size=16)) + 
+  theme(plot.margin=unit(c(0,0,0,0), "cm"))+
+  # FIX THE LEGEND TO ADD COLORS TO POINT SIZES
+  guides(size = guide_legend(override.aes = list(fill = rev(palette6))))
+
+p4=ggplot()+
+  geom_sf(data=(tracts10),
+          fill = "#F5F5F5", color = "grey",size = 0.1)+
+  ylim(1736000,1890000)+
+  xlim(6410000,6600000)+
+  geom_sf(data = allTracts.group %>%
+            dplyr::filter(TOD=="TOD") %>% 
+            dplyr::filter(year==2019) %>% 
+            st_centroid(),  
+          shape = 21,
+          aes(size = q5(TotalPop), fill = q5(TotalPop))) + 
+  scale_size_manual(
+    values = c(0.5,1,2,3,4), 	
+    name="Population",
+    labels = qBr(allTracts.group,"TotalPop",0)
+  ) +
+  scale_fill_manual(values = rev(palette6),
+                    labels = qBr(allTracts.group, "TotalPop",0),
+                    guide = FALSE ) +
+  labs(title = "Population Density 2019 within 0.5 mile of Merto Stations", 
+       subtitle = "Count by Census Tracts",
+       caption = "Data: US Census Bureau, ACS 5-year estimates",
+       size = 22) +
+  mapTheme() + 
+  theme(plot.title = element_text(size=16)) + 
+  theme(plot.margin=unit(c(0,0,0,0), "cm"))+
+  # FIX THE LEGEND TO ADD COLORS TO POINT SIZES
+  guides(size = guide_legend(override.aes = list(fill = rev(palette6))))
+
+cowplot::plot_grid(p3, p4, nrow = 2)
+```
+**Rent maps within 0.5 mile of each transit station**
+```{r rent graduated symbol map, fig.height=16, fig.width=9, warning=FALSE}
+p5=ggplot()+
+  geom_sf(data=(tracts10),
+          fill = "#F5F5F5", color = "grey",size = 0.1)+
+    ylim(1736000,1890000)+
+    xlim(6410000,6600000)+
+  geom_sf(data = allTracts.group %>%
+            dplyr::filter(TOD=="TOD") %>% 
+            dplyr::filter(year==2010) %>% 
+            st_centroid(),  
+            shape = 21,
+            aes(size = q5(MedRent.inf), fill = q5(MedRent.inf))) + 
+    scale_size_manual(
+      values = c(0.5,1,2,3,4), 	
+      name="Median Rent",
+      labels = qBr(allTracts.group,"MedRent.inf",0)
+      ) +
+    scale_fill_manual(values = rev(palette6),
+                      labels = qBr(allTracts.group, "MedRent.inf",0),
+                      guide = FALSE ) +
+    labs(title = "Median Rent 2010 within 0.5 mile of Merto Stations", 
+         subtitle = "Real Dollars",
+         caption = "Data: US Census Bureau, ACS 5-year estimates",
+         size = 22) +
+    mapTheme() + 
+    theme(plot.title = element_text(size=16)) + 
+    theme(plot.margin=unit(c(0,0,0,0), "cm"))+
+    # FIX THE LEGEND TO ADD COLORS TO POINT SIZES
+    guides(size = guide_legend(override.aes = list(fill = rev(palette6))))
+
+p6=ggplot()+
+  geom_sf(data=(tracts10),
+          fill = "#F5F5F5", color = "grey",size = 0.1)+
+    ylim(1736000,1890000)+
+    xlim(6410000,6600000)+
+  geom_sf(data = allTracts.group %>%
+            dplyr::filter(TOD=="TOD") %>% 
+            dplyr::filter(year==2019) %>% 
+            st_centroid(),  
+            shape = 21,
+            aes(size = q5(MedRent.inf), fill = q5(MedRent.inf))) + 
+    scale_size_manual(
+      values = c(0.5,1,2,3,4), 	
+      name="Median Rent",
+      labels = qBr(allTracts.group,"MedRent.inf",0)
+      ) +
+    scale_fill_manual(values = rev(palette6),
+                      labels = qBr(allTracts.group, "MedRent.inf",0),
+                      guide = FALSE ) +
+    labs(title = "Median Rent 2019 within 0.5 mile of Merto Stations", 
+         subtitle = "Real Dollars",
+         caption = "Data: US Census Bureau, ACS 5-year estimates",
+         size = 22) +
+    mapTheme() + 
+    theme(plot.title = element_text(size=16)) + 
+    theme(plot.margin=unit(c(0,0,0,0), "cm"))+
+    # FIX THE LEGEND TO ADD COLORS TO POINT SIZES
+    guides(size = guide_legend(override.aes = list(fill = rev(palette6))))
+
+cowplot::plot_grid(p5, p6, nrow = 2)
+```
+
+## Mean Rent Line Plot - rent as a function of distance to Metro stations 
+**Calculating distance to subway stations
+```{r Calculating distance to subway stations, warning=FALSE}
+#preparing a polygon
+for_mrbuffer <- st_union(st_buffer(MetroStops, 1)) %>%
+  st_sf()
+#applying multipleRingBuffer
+allTracts.rings <-
+  st_join(st_centroid(dplyr::select(allTracts.group, GEOID, year)), 
+          multipleRingBuffer(for_mrbuffer, 47520, 2640)) %>%
+  st_drop_geometry() %>%
+  left_join(dplyr::select(allTracts.group, MedRent.inf, GEOID, year), 
+            by=c("GEOID"="GEOID", "year"="year")) %>%
+  st_sf() %>%
+  mutate(distance = distance / 5280) #convert to miles
+```
+**Mean rent plots by distance to metro stations**
+```{r Mean rent plotas by distance to metro stations, fig.height=4, fig.width=11, warning=FALSE}
+#calculating mean rent fro each distance
+allTracts.rings <- allTracts.rings %>% 
+  group_by(distance,year) %>% 
+  mutate(mean_rent_distance = mean(MedRent.inf,na.rm = T)) %>% 
+  drop_na(distance) %>% 
+  st_sf()
+  
+ggplot(allTracts.rings)+
+  geom_line(aes(x = distance, 
+                y = mean_rent_distance,
+                colour = year)) +
+  geom_point(aes(x = distance, 
+                y = mean_rent_distance,
+                colour = year)) +
+  scale_color_manual(values = c(palette5[1],palette5[5])) +
+  labs(x = "Distance (mile)",
+       y = "Mean Rent ($)",
+       title = "Rent as A Function of Distance to Subway Stations", 
+       subtitle = "Real Dollars",
+       caption = "Data: US Census Bureau, ACS 5-year estimates") +
+  theme(legend.position="bottom") +
+  theme(plot.title = element_text(size=25)) + 
+  plotTheme()
+```
+
+## Crime-transit-rent Plots - the relationship between crime, transit access and rents
+**Connecting crime data with census data**
+```{r Connecting crime data with census data}
+Tracts.crime.10 <- st_join(allTracts.rings %>% dplyr::filter(year==2010), allrobberies.sf %>% dplyr::filter(year==2010)) %>% 
+  st_drop_geometry() %>% 
+  dplyr::select(GEOID, uid, MedRent.inf, distance) %>% 
+  left_join(allrobberies.sf, by = "uid")%>% 
+  st_sf() %>% 
+  group_by(distance) %>% 
+  summarize(Total_crime_distance = n(), mean_rent_diatance = mean(MedRent.inf,na.rm = T)) %>% 
+  mutate(year = 2010)
+
+Tracts.crime.19 <- st_join(allTracts.rings %>% dplyr::filter(year==2019), allrobberies.sf %>% dplyr::filter(year==2019)) %>% 
+  st_drop_geometry() %>% 
+  dplyr::select(GEOID, uid, MedRent.inf, distance) %>% 
+  left_join(allrobberies.sf, by = "uid")%>% 
+  st_sf() %>% 
+  group_by(distance) %>% 
+  summarize(Total_crime_distance = n(), mean_rent_diatance = mean(MedRent.inf,na.rm = T))%>% 
+  mutate(year = 2019)
+
+allTracts.crime <- 
+  rbind(Tracts.crime.10,Tracts.crime.19)
+```
+**Crime-Transit-Rent relationship Plots**
+```{r Crime-Transit-Rent Plots, fig.height=6, fig.width=11, warning=FALSE}
+ggplot(allTracts.crime, aes(distance, Total_crime_distance, fill = factor(year)))+
+  geom_bar(stat = "identity", position = "dodge") +
+  geom_line(data = allTracts.rings,
+            aes(x = distance, 
+                y = mean_rent_distance,
+                colour = factor(year))) +
+  geom_point(data = allTracts.rings,
+             aes(x = distance, 
+                y = mean_rent_distance,
+                colour = factor(year))) +
+  scale_color_manual(values = c(palette6[1],palette5[5]),
+                     name = "Mean Rent") +
+  scale_fill_manual(values = c("#fff2c0", "#e7e2a3"), 
+                    name = "Crime Count") +
+  labs(x = "Distance (mile)",
+       y = "Crime Count / Median Rent ($)",
+       title = "Crime & Rent by Distance to Subway Stations",
+       subtitle = "Reported Case / Real Dollars") +
+  theme(legend.position="bottom") +
+  plotTheme()+
+  theme(plot.title = element_text(size=22))
+```
+
+**Crime-Transit-Rent Map**
+```{r rime-Transit-Rent Map, fig.height=18, fig.width=9, warning=FALSE}
+ggplot(allrobberies.sf)+
+  geom_sf(data = allTracts.group, aes(fill = q5(MedRent.inf)), color = "grey", size = 0.2) +
+  geom_sf(data = allrobberies.sf,size = 0.01, color ="#D9653B") +
+  geom_sf(data = buffer, fill = "transparent", color = "grey30", size = 0.5)+
+  ylim(1720000,2130000) +
+  scale_fill_manual(values = palette5,
+                    labels = qBr(allTracts.group, "MedRent.inf"),
+                    name = "Rent ($)\n(Quintile Breaks)",
+                    na.value = "#F5F5F5") +
+  facet_wrap(~year,ncol = 1)+
+  theme(plot.margin=unit(c(0,0,0,0), "cm")) +
+  theme(plot.title = element_text(size=25)) + 
+    labs(title = "Median Rent & Roberry Crime Spot 2010 - 2019", subtitle = "The orange points denotes every roberry offence; The black border denotes areas close to subway tations") +
+  mapTheme() 
+```
+
+# Conclusion {#anchor}
+
+We cannot fully conclude that Los Angeles people are unwilling to spend more to live in areas with convenient public transportation, although rents have not followed the rise in subway access. Because current primary beneficiaries of the Los Angeles Metro are lower classes, who can accept unsafe neighborhoods with lower rents, rather than the upper-middle classes who are willing to pay more rent for transit amenities in the neighborhood. We can deduce from the characteristics of the TOD region, including a higher poverty rate, a higher proportion of Latino, and a higher incidence of crime. Apart from this, the poverty rate in the TOD region declined in 2019 compared to 2010, which means we have a chance to target people with higher classes in the future.
+
+However, the TOD area does bring convenience value to surrounding residents. The proportion of workers who choose public transportation to work in TOD areas is much higher than in non-TOD areas.
+
+Last but not least, these conclusions are based on two assumptions. First, we assume that the distribution and influence of the subway can represent the entire Los Angeles public transportation system. Also, in the analysis, we did not cover all the confounding variables. For example, why are rents lower in areas closer to the subway? It may be related to other characteristics of the city center, with which subways distribution coincides. We have analyzed one of them, crime. Further analysis is still required to explore more relative indicators and answer the root cause of low rents in the TOD region.
